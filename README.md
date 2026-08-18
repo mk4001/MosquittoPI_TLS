@@ -1,21 +1,22 @@
-# Mosquitto su Raspberry Pi: accesso remoto con port forwarding (porta 8883) + TLS
+# Mosquitto on Raspberry Pi: remote access via port forwarding (port 8883) + TLS, plus Node-RED
 
-Guida per configurare un broker Mosquitto con autenticazione username/password e TLS, raggiungibile da internet per l'app iOS **Tru-Control** (pilota un riscaldatore Truma Combi via un gateway MQTT/BLE), aprendo la porta 8883 sul router. Il certificato TLS viene emesso da Let's Encrypt (CA pubblica), quindi resta valido per un client "a profilo standard" — nessun certificato o CA custom da installare sull'app.
+Guide to set up a Mosquitto broker with username/password authentication and TLS, reachable from the internet for the iOS app **Tru-Control** (controls a Truma Combi heater through an MQTT/BLE gateway), by opening port 8883 on the router. The TLS certificate is issued by Let's Encrypt (a public CA), so it works with a "standard profile" client — no custom certificate or CA needs to be installed on the app.
 
-Hai già un dominio gestito su Cloudflare: lo useremo solo come DNS (senza proxy/tunnel) per assegnare un hostname stabile al tuo IP di casa e per ottenere il certificato in modo automatico.
+You already have a domain managed on Cloudflare: we'll only use it as DNS (no proxy/tunnel) to give your home's public IP a stable hostname, and to obtain the certificate automatically.
 
-## Panoramica dei passaggi
+## Overview
 
-1. Mosquitto: installazione, utente/password, listener TLS su 8883.
-2. Router: IP statico/riservato per il Pi + port forwarding 8883 → Pi.
-3. DNS su Cloudflare: record per il tuo IP pubblico (senza proxy) + eventuale aggiornamento dinamico se l'IP di casa cambia.
-4. Certificato Let's Encrypt via DNS-01 (plugin Cloudflare), rinnovo automatico.
-5. Firewall/hardening, dato che ora il broker è davvero esposto su internet.
-6. Test e configurazione di Tru-Control.
+1. Mosquitto: install, create user/password, TLS listener on 8883.
+2. Router: reserved/static IP for the Pi + port forwarding 8883 → Pi.
+3. DNS on Cloudflare: a record pointing to your public IP (no proxy) + optional dynamic update if your home IP changes.
+4. Let's Encrypt certificate via DNS-01 (Cloudflare plugin), automatic renewal.
+5. Firewall/hardening, since the broker is now genuinely exposed to the internet.
+6. Testing and configuring Tru-Control.
+7. Node-RED: installation and local-network access (port 1880 on the local firewall).
 
-## Parte 1 — Installazione e configurazione base di Mosquitto
+## Part 1 — Base Mosquitto installation and configuration
 
-Da eseguire sul Raspberry Pi via SSH.
+Run on the Raspberry Pi over SSH.
 
 ```bash
 sudo apt update
@@ -23,78 +24,78 @@ sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable mosquitto
 ```
 
-### Crea l'utente con password
+### Create the user with a password
 
 ```bash
-sudo mosquitto_passwd -c /etc/mosquitto/passwd nome_utente
-# ti chiede la password due volte
+sudo mosquitto_passwd -c /etc/mosquitto/passwd your_username
+# you'll be asked for the password twice
 ```
 
-Per aggiungere altri utenti in seguito (senza `-c`, che sovrascrive il file):
+To add more users later (without `-c`, which overwrites the file):
 
 ```bash
-sudo mosquitto_passwd /etc/mosquitto/passwd altro_utente
+sudo mosquitto_passwd /etc/mosquitto/passwd another_username
 ```
 
-### Permessi del file password (passaggio importante, causa comune di crash)
+### Password file permissions (important step, common cause of crashes)
 
-Il broker Mosquitto gira con l'utente di sistema `mosquitto`, non come root. Il comando sopra crea il file come `root:root` con permessi `600`, quindi il broker non riesce a leggerlo e il servizio muore subito all'avvio (nei log di `journalctl` lo vedrai come `mosquitto.service: Main process exited, code=exited, status=13`). Correggi i permessi subito dopo averlo creato:
+The Mosquitto broker runs as the system user `mosquitto`, not as root. The command above creates the file as `root:root` with `600` permissions, so the broker can't read it and the service dies immediately on startup (in `journalctl` you'll see `mosquitto.service: Main process exited, code=exited, status=13`). Fix the permissions right after creating it:
 
 ```bash
 sudo chown root:mosquitto /etc/mosquitto/passwd
 sudo chmod 640 /etc/mosquitto/passwd
 ```
 
-Ripeti questo comando ogni volta che aggiungi un utente con `mosquitto_passwd` (il comando riscrive il file e ne resetta i permessi a `600 root:root`).
+Repeat this every time you add a user with `mosquitto_passwd` (the command rewrites the file and resets its permissions to `600 root:root`).
 
-Il listener TLS vero e proprio lo aggiungiamo nella Parte 4, dopo aver ottenuto il certificato (Mosquitto non parte se il file di configurazione punta a certificati che non esistono ancora).
+We'll add the actual TLS listener in Part 4, after obtaining the certificate (Mosquitto won't start if the config file points to certificate files that don't exist yet).
 
-## Parte 2 — Router: IP riservato + port forwarding
+## Part 2 — Router: reserved IP + port forwarding
 
-### 1. Riserva un IP fisso al Raspberry Pi
+### 1. Reserve a fixed IP for the Raspberry Pi
 
-Nel pannello di amministrazione del router, cerca la sezione DHCP (spesso "DHCP reservation" o "IP statico") e assegna un IP fisso al Pi in base al suo indirizzo MAC (lo trovi con `ip link show` sul Pi). Così il port forwarding non si rompe al prossimo riavvio/rinnovo DHCP.
+In your router's admin panel, look for the DHCP section (often called "DHCP reservation" or "static IP") and assign a fixed IP to the Pi based on its MAC address (find it with `ip link show` on the Pi). This way the port forwarding rule won't break after the next reboot/DHCP renewal.
 
-### 2. Apri la porta 8883
+### 2. Open port 8883
 
-Nella sezione "Port Forwarding" / "NAT" / "Virtual Server" del router, crea una regola:
+In the router's "Port Forwarding" / "NAT" / "Virtual Server" section, create a rule:
 
-- Protocollo: TCP
-- Porta esterna: 8883
-- IP interno: l'IP fisso del Pi assegnato sopra
-- Porta interna: 8883
+- Protocol: TCP
+- External port: 8883
+- Internal IP: the Pi's fixed IP assigned above
+- Internal port: 8883
 
-Non serve aprire nient'altro (niente 1883, niente 80): niente traffico in chiaro esposto, e il certificato lo otteniamo senza bisogno della porta 80 (vedi Parte 4).
+Nothing else needs to be opened (no 1883, no 80): no plaintext traffic exposed, and we obtain the certificate without needing port 80 (see Part 4).
 
-## Parte 3 — DNS su Cloudflare
+## Part 3 — DNS on Cloudflare
 
-Ti serve un hostname stabile che punti al tuo IP pubblico di casa, es. `mqtt.tuodominio.com`.
+You need a stable hostname pointing to your home's public IP, e.g. `mqtt.yourdomain.com`.
 
-### 1. Crea il record DNS
+### 1. Create the DNS record
 
-Nel pannello DNS di Cloudflare, aggiungi un record:
+In Cloudflare's DNS panel, add a record:
 
-- Tipo: `A`
-- Nome: `mqtt`
-- Contenuto: il tuo IP pubblico attuale (verificabile con `curl ifconfig.me` dal Pi)
-- **Proxy status: DNS only (nuvoletta grigia, non arancione)**
+- Type: `A`
+- Name: `mqtt`
+- Content: your current public IP (check with `curl ifconfig.me` on the Pi)
+- **Proxy status: DNS only (grey cloud, not orange)**
 
-Questo ultimo punto è importante: se lasci il proxy Cloudflare attivo (nuvoletta arancione), il traffico MQTT su TCP puro non passa — il proxy Cloudflare inoltra solo HTTP(S). Con "DNS only" il record punta direttamente al tuo IP di casa, come un DNS normale.
+This last point matters: if you leave the Cloudflare proxy on (orange cloud), plain-TCP MQTT traffic won't get through — the Cloudflare proxy only forwards HTTP(S). With "DNS only" the record points straight to your home IP, like a normal DNS entry.
 
-### 2. Se il tuo IP pubblico non è statico (caso più comune per le linee residenziali)
+### 2. If your public IP isn't static (the common case for residential lines)
 
-Devi aggiornare il record ogni volta che l'IP cambia. Il modo più semplice è un piccolo script cron sul Pi che usa l'API di Cloudflare:
+You need to update the record whenever the IP changes. The simplest approach is a small cron script on the Pi that uses the Cloudflare API:
 
-1. Crea un **API Token** su Cloudflare (non la Global API Key) con permesso `Zone → DNS → Edit` limitato solo alla zona del tuo dominio.
-2. Salva token, zone ID e record ID in uno script tipo:
+1. Create an **API Token** on Cloudflare (not the Global API Key) with `Zone → DNS → Edit` permission, scoped only to your domain's zone.
+2. Save the token, zone ID, and record ID in a script like:
 
 ```bash
 #!/bin/bash
 # /usr/local/bin/update-cloudflare-dns.sh
-CF_API_TOKEN="il_tuo_token"
-ZONE_ID="il_tuo_zone_id"
-RECORD_ID="l_id_del_record_A_mqtt"
-RECORD_NAME="mqtt.tuodominio.com"
+CF_API_TOKEN="your_token"
+ZONE_ID="your_zone_id"
+RECORD_ID="the_mqtt_A_record_id"
+RECORD_NAME="mqtt.yourdomain.com"
 
 CURRENT_IP=$(curl -s https://ifconfig.me)
 
@@ -107,65 +108,65 @@ curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/
 ```bash
 sudo chmod +x /usr/local/bin/update-cloudflare-dns.sh
 sudo crontab -e
-# aggiungi:
+# add:
 */15 * * * * /usr/local/bin/update-cloudflare-dns.sh >/dev/null 2>&1
 ```
 
-Se invece il tuo provider ti dà un IP statico (chiedilo se non sei sicuro), puoi saltare questo punto: imposti il record una volta sola.
+If your provider gives you a static IP (ask them if you're not sure), you can skip this: just set the record once.
 
-## Parte 4 — Certificato TLS pubblico con Let's Encrypt (DNS-01, senza aprire la porta 80)
+## Part 4 — Public TLS certificate with Let's Encrypt (DNS-01, no need to open port 80)
 
-Usiamo la sfida DNS-01 con il plugin Cloudflare di certbot: non richiede nessuna porta aperta in più, funziona anche se il tuo IP cambia, e ti dà un certificato riconosciuto da qualsiasi client standard.
+We use the DNS-01 challenge with certbot's Cloudflare plugin: it doesn't require any extra open port, works even if your IP changes, and gives you a certificate trusted by any standard client.
 
-### 1. Installa certbot con il plugin Cloudflare
+### 1. Install certbot with the Cloudflare plugin
 
 ```bash
 sudo apt install -y certbot python3-certbot-dns-cloudflare
 ```
 
-### 2. Crea le credenziali per il plugin
+### 2. Create credentials for the plugin
 
 ```bash
 sudo mkdir -p /etc/letsencrypt
 sudo nano /etc/letsencrypt/cloudflare.ini
 ```
 
-Contenuto (usa lo stesso API Token creato sopra, con permesso `Zone:DNS:Edit` sulla zona del dominio):
+Content (use the same API Token created above, with `Zone:DNS:Edit` permission on the domain's zone):
 
 ```ini
-dns_cloudflare_api_token = il_tuo_token
+dns_cloudflare_api_token = your_token
 ```
 
 ```bash
 sudo chmod 600 /etc/letsencrypt/cloudflare.ini
 ```
 
-### 3. Richiedi il certificato
+### 3. Request the certificate
 
 ```bash
 sudo certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  -d mqtt.tuodominio.com
+  -d mqtt.yourdomain.com
 ```
 
-Il certificato finisce in `/etc/letsencrypt/live/mqtt.tuodominio.com/`.
+The certificate ends up in `/etc/letsencrypt/live/mqtt.yourdomain.com/`.
 
-### 4. Rendi i certificati leggibili da Mosquitto e automatizza il rinnovo
+### 4. Make the certificates readable by Mosquitto and automate renewal
 
-I file di Let's Encrypt sono leggibili solo da root; Mosquitto gira con un utente dedicato. Il modo più pulito è copiarli in una cartella accessibile a Mosquitto ogni volta che vengono rinnovati, tramite un "deploy hook" di certbot.
+Let's Encrypt's files are readable only by root; Mosquitto runs as its own dedicated user. The cleanest approach is to copy them into a folder Mosquitto can read every time they're renewed, via a certbot "deploy hook".
 
 ```bash
 sudo mkdir -p /etc/mosquitto/certs
 sudo nano /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
 ```
 
-Contenuto:
+Content:
 
 ```bash
 #!/bin/bash
-cp /etc/letsencrypt/live/mqtt.tuodominio.com/fullchain.pem /etc/mosquitto/certs/
-cp /etc/letsencrypt/live/mqtt.tuodominio.com/privkey.pem /etc/mosquitto/certs/
+cp /etc/letsencrypt/live/mqtt.yourdomain.com/fullchain.pem /etc/mosquitto/certs/
+cp /etc/letsencrypt/live/mqtt.yourdomain.com/privkey.pem /etc/mosquitto/certs/
 chown mosquitto:mosquitto /etc/mosquitto/certs/*.pem
 chmod 640 /etc/mosquitto/certs/*.pem
 systemctl restart mosquitto
@@ -173,31 +174,31 @@ systemctl restart mosquitto
 
 ```bash
 sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
-# esegui una prima volta a mano per popolare /etc/mosquitto/certs
+# run it once by hand to populate /etc/mosquitto/certs
 sudo /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
 ```
 
-Certbot installa già un timer di sistema (`certbot.timer`) che controlla il rinnovo due volte al giorno e rinnova solo quando necessario (i certificati Let's Encrypt durano 90 giorni); lo script sopra viene lanciato automaticamente ad ogni rinnovo, quindi da qui in poi è tutto automatico. Puoi verificare che il timer sia attivo con:
+Certbot already installs a systemd timer (`certbot.timer`) that checks for renewal twice a day and only renews when needed (Let's Encrypt certificates last 90 days); the script above runs automatically on every renewal, so from here on it's all automatic. You can verify the timer is active with:
 
 ```bash
 systemctl status certbot.timer
 ```
 
-## Parte 5 — Listener TLS su Mosquitto
+## Part 5 — TLS listener on Mosquitto
 
-Crea/aggiorna `/etc/mosquitto/conf.d/remote.conf`:
+Create/update `/etc/mosquitto/conf.d/remote.conf`:
 
 ```conf
-# IMPORTANTE: nelle versioni recenti di Mosquitto (default su Raspberry Pi OS)
-# /etc/mosquitto/mosquitto.conf contiene "per_listener_settings true". Con
-# questa opzione attiva, allow_anonymous/password_file scritti PRIMA di un
-# "listener" si applicano solo a un listener di default implicito, non ai
-# listener dichiarati esplicitamente sotto. Vanno quindi ripetuti dopo ogni
-# riga "listener", altrimenti quel listener non ha nessun backend di
-# autenticazione e rifiuta chiunque con "not authorised" (CONNACK 5),
-# indipendentemente da quanto siano corrette le credenziali.
+# IMPORTANT: recent versions of Mosquitto (the default on Raspberry Pi OS)
+# have "per_listener_settings true" in /etc/mosquitto/mosquitto.conf. With
+# this option on, allow_anonymous/password_file written BEFORE a "listener"
+# line only apply to an implicit default listener, not to the listeners
+# declared explicitly below. They must therefore be repeated after every
+# "listener" line, otherwise that listener has no authentication backend at
+# all and rejects everyone with "not authorised" (CONNACK 5), no matter how
+# correct the credentials are.
 
-# Listener TLS pubblico, quello esposto tramite il port forwarding del router
+# Public TLS listener, the one exposed via the router's port forwarding
 listener 8883
 certfile /etc/mosquitto/certs/fullchain.pem
 keyfile /etc/mosquitto/certs/privkey.pem
@@ -205,26 +206,26 @@ require_certificate false
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 
-# Listener in chiaro SOLO per test locali da loopback (non esposto su internet,
-# non inoltrato dal router). Volutamente senza password_file: resta
-# inutilizzabile da chiunque (niente anonimo, nessun backend di
-# autenticazione), dato che non serve dall'esterno.
+# Plaintext listener ONLY for local loopback testing (not exposed to the
+# internet, not forwarded by the router). Deliberately without
+# password_file: it stays unusable by anyone (no anonymous access, no
+# authentication backend), since it's not needed from the outside.
 listener 1883 127.0.0.1
 allow_anonymous false
 ```
 
-`require_certificate false` è importante: significa che Mosquitto richiede TLS server-side (il client verifica il certificato del server) ma non pretende un certificato client — coerente con il vincolo che hai posto ("profilo standard", nessun certificato lato client).
+`require_certificate false` matters: it means Mosquitto requires server-side TLS (the client verifies the server's certificate) but does not demand a client certificate — consistent with your requirement of a "standard profile", no client-side certificate.
 
-Riavvia:
+Restart:
 
 ```bash
 sudo systemctl restart mosquitto
 sudo systemctl status mosquitto
 ```
 
-### Se il servizio non parte (exit status 13)
+### If the service won't start (exit status 13)
 
-`status=13` significa quasi sempre "permesso negato" nella lettura di uno dei file richiamati dalla config (`password_file`, `certfile` o `keyfile`) — il broker gira come utente `mosquitto`, non root. Diagnosi:
+`status=13` almost always means "permission denied" reading one of the files referenced in the config (`password_file`, `certfile`, or `keyfile`) — the broker runs as the `mosquitto` user, not root. Diagnose with:
 
 ```bash
 sudo journalctl -u mosquitto -n 30 --no-pager
@@ -232,7 +233,7 @@ ls -l /etc/mosquitto/passwd
 ls -l /etc/mosquitto/certs/
 ```
 
-La riga di `journalctl` emessa direttamente da Mosquitto (non da systemd) indica quale file è il problema. Correggi i permessi del file coinvolto:
+The line logged directly by Mosquitto (not by systemd) tells you which file is the problem. Fix the permissions of the file involved:
 
 ```bash
 sudo chown root:mosquitto /etc/mosquitto/passwd
@@ -242,271 +243,92 @@ sudo chown mosquitto:mosquitto /etc/mosquitto/certs/*.pem
 sudo chmod 640 /etc/mosquitto/certs/*.pem
 ```
 
-Poi riavvia di nuovo con `sudo systemctl restart mosquitto`.
+Then restart again with `sudo systemctl restart mosquitto`.
 
-## Parte 6 — Firewall e hardening
+## Part 6 — Firewall and hardening
 
-Con la porta 8883 davvero esposta su internet, questo passaggio conta più che con un tunnel.
+With port 8883 genuinely exposed to the internet, this step matters more than it would with a tunnel.
 
 ```bash
 sudo apt install -y ufw
-sudo ufw allow 22/tcp        # SSH, se lo usi — occhio a non tagliarti fuori
+sudo ufw allow 22/tcp        # SSH, if you use it — be careful not to lock yourself out
 sudo ufw allow 8883/tcp
 sudo ufw enable
 ```
 
-Consigli aggiuntivi:
+Additional recommendations:
 
-- Password MQTT lunghe e casuali, uniche per ogni utente/dispositivo.
-- Valuta `fail2ban` con un filtro sul log di Mosquitto per bloccare IP che falliscono ripetutamente l'autenticazione (i broker MQTT esposti vengono scansionati regolarmente da bot su internet).
-- Se in futuro avrai più utenti/dispositivi con permessi diversi, usa un file ACL (`acl_file`) per limitare i topic per utente.
-- Tieni aggiornati Raspberry Pi OS e Mosquitto (`sudo apt update && sudo apt upgrade`).
-- Controlla ogni tanto `/var/log/mosquitto/mosquitto.log` per tentativi di accesso sospetti.
+- Long, random MQTT passwords, unique per user/device.
+- Consider `fail2ban` with a filter on the Mosquitto log to block IPs that repeatedly fail authentication (exposed MQTT brokers get scanned regularly by bots on the internet).
+- If you'll have multiple users/devices with different permissions in the future, use an ACL file (`acl_file`) to restrict topics per user.
+- Keep Raspberry Pi OS and Mosquitto updated (`sudo apt update && sudo apt upgrade`).
+- Check `/var/log/mosquitto/mosquitto.log` from time to time for suspicious access attempts.
 
-## Parte 7 — Test e configurazione di Tru-Control
+## Part 7 — Testing and configuring Tru-Control
 
-### Test da fuori casa (es. con i dati mobili, non sul Wi-Fi di casa)
+### Test from outside your home network (e.g. on mobile data, not your home Wi-Fi)
 
 ```bash
-mosquitto_pub -h mqtt.tuodominio.com -p 8883 \
+mosquitto_pub -h mqtt.yourdomain.com -p 8883 \
   --tls-use-os-certs \
-  -u nome_utente -P la_tua_password \
-  -t test/topic -m "ciao"
+  -u your_username -P your_password \
+  -t test/topic -m "hello"
 ```
 
-Se non dà errori di certificato o connessione, il percorso end-to-end funziona.
+If it doesn't return certificate or connection errors, the end-to-end path works.
 
-### Configura l'app
+### Configure the app
 
-Nelle impostazioni MQTT di Tru-Control:
+In Tru-Control's MQTT settings:
 
-- **Host**: `mqtt.tuodominio.com`
-- **Porta**: `8883`
-- **TLS/SSL**: attivo, profilo/certificato "standard" (nessun certificato o CA da importare)
-- **Username / Password**: quelli creati con `mosquitto_passwd`
+- **Host**: `mqtt.yourdomain.com`
+- **Port**: `8883`
+- **TLS/SSL**: on, "standard" profile/certificate (no certificate or CA to import)
+- **Username / Password**: the ones created with `mosquitto_passwd`
 
-## Appendice — Alternative senza aprire porte (se cambi idea in futuro)
+## Part 8 — Node-RED: installation and local-network access
 
-Se in futuro preferissi non tenere una porta aperta permanentemente sul router, restano disponibili due alternative già validate durante la ricerca per questa guida:
+Node-RED is handy for bridging/automating flows around the broker (e.g. relaying data between the gateway and other services). This section covers installing it on the Pi and reaching its editor from a browser on your local network — it does **not** cover exposing it to the internet, for the security reason explained below.
 
-- **Tailscale Funnel**: TCP+TLS con certificato pubblico automatico, nessuna porta da aprire, compatibile con MQTT su TCP puro (probabilmente il caso di Tru-Control). Percorso più semplice da attivare/disattivare in parallelo a quello con port forwarding.
-- **Cloudflare Tunnel**: richiede che il client supporti MQTT su WebSocket (`wss://`), cosa non confermata per Tru-Control; il tunneling di MQTT su TCP puro via Cloudflare è disponibile solo con Spectrum (piano Enterprise a pagamento).
-
-Se vuoi, posso riaggiungere le istruzioni dettagliate di uno dei due percorsi in un secondo momento.
-## Parte 3 — DNS su Cloudflare
-
-Ti serve un hostname stabile che punti al tuo IP pubblico di casa, es. `mqtt.tuodominio.com`.
-
-### 1. Crea il record DNS
-
-Nel pannello DNS di Cloudflare, aggiungi un record:
-
-- Tipo: `A`
-- Nome: `mqtt`
-- Contenuto: il tuo IP pubblico attuale (verificabile con `curl ifconfig.me` dal Pi)
-- **Proxy status: DNS only (nuvoletta grigia, non arancione)**
-
-Questo ultimo punto è importante: se lasci il proxy Cloudflare attivo (nuvoletta arancione), il traffico MQTT su TCP puro non passa — il proxy Cloudflare inoltra solo HTTP(S). Con "DNS only" il record punta direttamente al tuo IP di casa, come un DNS normale.
-
-### 2. Se il tuo IP pubblico non è statico (caso più comune per le linee residenziali)
-
-Devi aggiornare il record ogni volta che l'IP cambia. Il modo più semplice è un piccolo script cron sul Pi che usa l'API di Cloudflare:
-
-1. Crea un **API Token** su Cloudflare (non la Global API Key) con permesso `Zone → DNS → Edit` limitato solo alla zona del tuo dominio.
-2. Salva token, zone ID e record ID in uno script tipo:
+### 1. Install Node-RED
 
 ```bash
-#!/bin/bash
-# /usr/local/bin/update-cloudflare-dns.sh
-CF_API_TOKEN="il_tuo_token"
-ZONE_ID="il_tuo_zone_id"
-RECORD_ID="l_id_del_record_A_mqtt"
-RECORD_NAME="mqtt.tuodominio.com"
-
-CURRENT_IP=$(curl -s https://ifconfig.me)
-
-curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
-  -H "Authorization: Bearer $CF_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data "{\"type\":\"A\",\"name\":\"$RECORD_NAME\",\"content\":\"$CURRENT_IP\",\"proxied\":false}"
+bash <(curl -sL https://raw.githubusercontent.com/node-red/linux-installers/master/deb/update-nodejs-and-nodered)
 ```
+
+The official installer also takes care of installing/updating Node.js if needed. Follow the on-screen prompts (you can accept the defaults).
+
+### 2. Enable it as a service and start it
 
 ```bash
-sudo chmod +x /usr/local/bin/update-cloudflare-dns.sh
-sudo crontab -e
-# aggiungi:
-*/15 * * * * /usr/local/bin/update-cloudflare-dns.sh >/dev/null 2>&1
+sudo systemctl enable nodered.service
+sudo systemctl start nodered.service
+sudo systemctl status nodered.service
 ```
 
-Se invece il tuo provider ti dà un IP statico (chiedilo se non sei sicuro), puoi saltare questo punto: imposti il record una volta sola.
+### 3. Open port 1880 on the local firewall
 
-## Parte 4 — Certificato TLS pubblico con Let's Encrypt (DNS-01, senza aprire la porta 80)
-
-Usiamo la sfida DNS-01 con il plugin Cloudflare di certbot: non richiede nessuna porta aperta in più, funziona anche se il tuo IP cambia, e ti dà un certificato riconosciuto da qualsiasi client standard.
-
-### 1. Installa certbot con il plugin Cloudflare
+If you followed Part 6, `ufw` is active and only allows 22 (SSH) and 8883 (MQTT) — that's why the Node-RED editor doesn't load in the browser. Add a rule for Node-RED's default port:
 
 ```bash
-sudo apt install -y certbot python3-certbot-dns-cloudflare
+sudo ufw allow 1880/tcp
+sudo ufw reload
+sudo ufw status
 ```
 
-### 2. Crea le credenziali per il plugin
+Then open `http://<Pi-local-IP>:1880` from a browser on a device connected to the same home Wi-Fi (use the fixed IP you reserved for the Pi in Part 2).
 
-```bash
-sudo mkdir -p /etc/letsencrypt
-sudo nano /etc/letsencrypt/cloudflare.ini
-```
+### Important security note
 
-Contenuto (usa lo stesso API Token creato sopra, con permesso `Zone:DNS:Edit` sulla zona del dominio):
+**Do not forward port 1880 on the router.** Unlike Mosquitto, Node-RED's editor has no login by default — anyone who could reach it over the internet would be able to run arbitrary code on the Pi. Keep it reachable only from your LAN, as set up above.
 
-```ini
-dns_cloudflare_api_token = il_tuo_token
-```
+If you ever need remote access to Node-RED, set up its built-in authentication first (`adminAuth` in `~/.node-red/settings.js`) before considering any kind of external exposure — ask if you'd like that section added.
 
-```bash
-sudo chmod 600 /etc/letsencrypt/cloudflare.ini
-```
+## Appendix — Alternatives without opening ports (if you change your mind later)
 
-### 3. Richiedi il certificato
+If in the future you'd rather not keep a port permanently open on the router, two alternatives were already validated while researching this guide:
 
-```bash
-sudo certbot certonly \
-  --dns-cloudflare \
-  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  -d mqtt.tuodominio.com
-```
+- **Tailscale Funnel**: TCP+TLS with an automatic public certificate, no port to open, compatible with plain-TCP MQTT (likely Tru-Control's case). Simpler to turn on/off in parallel with the port-forwarding setup.
+- **Cloudflare Tunnel**: requires the client to support MQTT over WebSocket (`wss://`), which wasn't confirmed for Tru-Control; tunneling plain-TCP MQTT through Cloudflare is only available with Spectrum (a paid Enterprise plan).
 
-Il certificato finisce in `/etc/letsencrypt/live/mqtt.tuodominio.com/`.
-
-### 4. Rendi i certificati leggibili da Mosquitto e automatizza il rinnovo
-
-I file di Let's Encrypt sono leggibili solo da root; Mosquitto gira con un utente dedicato. Il modo più pulito è copiarli in una cartella accessibile a Mosquitto ogni volta che vengono rinnovati, tramite un "deploy hook" di certbot.
-
-```bash
-sudo mkdir -p /etc/mosquitto/certs
-sudo nano /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
-```
-
-Contenuto:
-
-```bash
-#!/bin/bash
-cp /etc/letsencrypt/live/mqtt.tuodominio.com/fullchain.pem /etc/mosquitto/certs/
-cp /etc/letsencrypt/live/mqtt.tuodominio.com/privkey.pem /etc/mosquitto/certs/
-chown mosquitto:mosquitto /etc/mosquitto/certs/*.pem
-chmod 640 /etc/mosquitto/certs/*.pem
-systemctl restart mosquitto
-```
-
-```bash
-sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
-# esegui una prima volta a mano per popolare /etc/mosquitto/certs
-sudo /etc/letsencrypt/renewal-hooks/deploy/mosquitto-reload.sh
-```
-
-Certbot installa già un timer di sistema (`certbot.timer`) che controlla il rinnovo due volte al giorno e rinnova solo quando necessario (i certificati Let's Encrypt durano 90 giorni); lo script sopra viene lanciato automaticamente ad ogni rinnovo, quindi da qui in poi è tutto automatico. Puoi verificare che il timer sia attivo con:
-
-```bash
-systemctl status certbot.timer
-```
-
-## Parte 5 — Listener TLS su Mosquitto
-
-Crea/aggiorna `/etc/mosquitto/conf.d/remote.conf`:
-
-```conf
-# Autenticazione obbligatoria: niente accesso anonimo
-allow_anonymous false
-password_file /etc/mosquitto/passwd
-
-# Listener TLS pubblico, quello esposto tramite il port forwarding del router
-listener 8883
-certfile /etc/mosquitto/certs/fullchain.pem
-keyfile /etc/mosquitto/certs/privkey.pem
-require_certificate false
-
-# Listener in chiaro SOLO per test locali da loopback (non esposto su internet,
-# non inoltrato dal router)
-listener 1883 127.0.0.1
-```
-
-`require_certificate false` è importante: significa che Mosquitto richiede TLS server-side (il client verifica il certificato del server) ma non pretende un certificato client — coerente con il vincolo che hai posto ("profilo standard", nessun certificato lato client).
-
-Riavvia:
-
-```bash
-sudo systemctl restart mosquitto
-sudo systemctl status mosquitto
-```
-
-### Se il servizio non parte (exit status 13)
-
-`status=13` significa quasi sempre "permesso negato" nella lettura di uno dei file richiamati dalla config (`password_file`, `certfile` o `keyfile`) — il broker gira come utente `mosquitto`, non root. Diagnosi:
-
-```bash
-sudo journalctl -u mosquitto -n 30 --no-pager
-ls -l /etc/mosquitto/passwd
-ls -l /etc/mosquitto/certs/
-```
-
-La riga di `journalctl` emessa direttamente da Mosquitto (non da systemd) indica quale file è il problema. Correggi i permessi del file coinvolto:
-
-```bash
-sudo chown root:mosquitto /etc/mosquitto/passwd
-sudo chmod 640 /etc/mosquitto/passwd
-
-sudo chown mosquitto:mosquitto /etc/mosquitto/certs/*.pem
-sudo chmod 640 /etc/mosquitto/certs/*.pem
-```
-
-Poi riavvia di nuovo con `sudo systemctl restart mosquitto`.
-
-## Parte 6 — Firewall e hardening
-
-Con la porta 8883 davvero esposta su internet, questo passaggio conta più che con un tunnel.
-
-```bash
-sudo apt install -y ufw
-sudo ufw allow 22/tcp        # SSH, se lo usi — occhio a non tagliarti fuori
-sudo ufw allow 8883/tcp
-sudo ufw enable
-```
-
-Consigli aggiuntivi:
-
-- Password MQTT lunghe e casuali, uniche per ogni utente/dispositivo.
-- Valuta `fail2ban` con un filtro sul log di Mosquitto per bloccare IP che falliscono ripetutamente l'autenticazione (i broker MQTT esposti vengono scansionati regolarmente da bot su internet).
-- Se in futuro avrai più utenti/dispositivi con permessi diversi, usa un file ACL (`acl_file`) per limitare i topic per utente.
-- Tieni aggiornati Raspberry Pi OS e Mosquitto (`sudo apt update && sudo apt upgrade`).
-- Controlla ogni tanto `/var/log/mosquitto/mosquitto.log` per tentativi di accesso sospetti.
-
-## Parte 7 — Test e configurazione di Tru-Control
-
-### Test da fuori casa (es. con i dati mobili, non sul Wi-Fi di casa)
-
-```bash
-mosquitto_pub -h mqtt.tuodominio.com -p 8883 \
-  --tls-use-os-certs \
-  -u nome_utente -P la_tua_password \
-  -t test/topic -m "ciao"
-```
-
-Se non dà errori di certificato o connessione, il percorso end-to-end funziona.
-
-### Configura l'app
-
-Nelle impostazioni MQTT di Tru-Control:
-
-- **Host**: `mqtt.tuodominio.com`
-- **Porta**: `8883`
-- **TLS/SSL**: attivo, profilo/certificato "standard" (nessun certificato o CA da importare)
-- **Username / Password**: quelli creati con `mosquitto_passwd`
-
-## Appendice — Alternative senza aprire porte (se cambi idea in futuro)
-
-Se in futuro preferissi non tenere una porta aperta permanentemente sul router, restano disponibili due alternative già validate durante la ricerca per questa guida:
-
-- **Tailscale Funnel**: TCP+TLS con certificato pubblico automatico, nessuna porta da aprire, compatibile con MQTT su TCP puro (probabilmente il caso di Tru-Control). Percorso più semplice da attivare/disattivare in parallelo a quello con port forwarding.
-- **Cloudflare Tunnel**: richiede che il client supporti MQTT su WebSocket (`wss://`), cosa non confermata per Tru-Control; il tunneling di MQTT su TCP puro via Cloudflare è disponibile solo con Spectrum (piano Enterprise a pagamento).
-
-Se vuoi, posso riaggiungere le istruzioni dettagliate di uno dei due percorsi in un secondo momento.
+Let me know if you'd like the detailed instructions for either path added back in.
