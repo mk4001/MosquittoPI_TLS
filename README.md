@@ -1,4 +1,5 @@
-# Mosquitto on Raspberry Pi: remote access via port forwarding (port 8883) + TLS, plus Node-RED
+# Mosquitto on Raspberry Pi + TLS, Node-RED.
+##  remote access via port forwarding (port 8883)
 
 Guide to set up a Mosquitto broker with username/password authentication and TLS, reachable from the internet for the iOS app **Tru-Control** (controls a Truma Combi heater through an MQTT/BLE gateway), by opening port 8883 on the router. The TLS certificate is issued by Let's Encrypt (a public CA), so it works with a "standard profile" client — no custom certificate or CA needs to be installed on the app.
 
