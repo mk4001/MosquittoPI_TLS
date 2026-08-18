@@ -36,6 +36,17 @@ Per aggiungere altri utenti in seguito (senza `-c`, che sovrascrive il file):
 sudo mosquitto_passwd /etc/mosquitto/passwd altro_utente
 ```
 
+### Permessi del file password (passaggio importante, causa comune di crash)
+
+Il broker Mosquitto gira con l'utente di sistema `mosquitto`, non come root. Il comando sopra crea il file come `root:root` con permessi `600`, quindi il broker non riesce a leggerlo e il servizio muore subito all'avvio (nei log di `journalctl` lo vedrai come `mosquitto.service: Main process exited, code=exited, status=13`). Correggi i permessi subito dopo averlo creato:
+
+```bash
+sudo chown root:mosquitto /etc/mosquitto/passwd
+sudo chmod 640 /etc/mosquitto/passwd
+```
+
+Ripeti questo comando ogni volta che aggiungi un utente con `mosquitto_passwd` (il comando riscrive il file e ne resetta i permessi a `600 root:root`).
+
 Il listener TLS vero e proprio lo aggiungiamo nella Parte 4, dopo aver ottenuto il certificato (Mosquitto non parte se il file di configurazione punta a certificati che non esistono ancora).
 
 ## Parte 2 — Router: IP riservato + port forwarding
@@ -200,6 +211,28 @@ Riavvia:
 sudo systemctl restart mosquitto
 sudo systemctl status mosquitto
 ```
+
+### Se il servizio non parte (exit status 13)
+
+`status=13` significa quasi sempre "permesso negato" nella lettura di uno dei file richiamati dalla config (`password_file`, `certfile` o `keyfile`) — il broker gira come utente `mosquitto`, non root. Diagnosi:
+
+```bash
+sudo journalctl -u mosquitto -n 30 --no-pager
+ls -l /etc/mosquitto/passwd
+ls -l /etc/mosquitto/certs/
+```
+
+La riga di `journalctl` emessa direttamente da Mosquitto (non da systemd) indica quale file è il problema. Correggi i permessi del file coinvolto:
+
+```bash
+sudo chown root:mosquitto /etc/mosquitto/passwd
+sudo chmod 640 /etc/mosquitto/passwd
+
+sudo chown mosquitto:mosquitto /etc/mosquitto/certs/*.pem
+sudo chmod 640 /etc/mosquitto/certs/*.pem
+```
+
+Poi riavvia di nuovo con `sudo systemctl restart mosquitto`.
 
 ## Parte 6 — Firewall e hardening
 
