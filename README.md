@@ -318,6 +318,13 @@ sudo ufw status
 
 Then open `http://<Pi-local-IP>:1880` from a browser on a device connected to the same home Wi-Fi (use the fixed IP you reserved for the Pi in Part 2).
 
+### Ho to install the Truma Simulator on NodeRED
+
+If you would like to test the Tru-Control IOS App with a Truma Simulator, you can IMPORT this JSON file, setup the MQTT Broker credentials and that's all folks!
+
+https://github.com/mk4001/MosquittoPI_TLS/blob/main/Truma%20Simulator%20x%20Tru-Control.json
+
+
 ### Important security note
 
 **Do not forward port 1880 on the router.** Unlike Mosquitto, Node-RED's editor has no login by default — anyone who could reach it over the internet would be able to run arbitrary code on the Pi. Keep it reachable only from your LAN, as set up above.
